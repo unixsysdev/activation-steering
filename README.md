@@ -7,6 +7,15 @@ continues trying rather than recommending that the user stop.
 Trained on **Qwen3-0.6B** (`Qwen3ForCausalLM`) and applied at inference inside
 the **vLLM** engine, on AMD Strix Halo (gfx1151).
 
+> ⚠️ **Scope disclaimer.** This demonstrates a **semantic** shift — the model's
+> wording and framing change (see [RESULTS.md](RESULTS.md)) — but it is **not
+> yet evidence of a behavioral change** that survives multi-turn agentic use.
+> A 0.6B model lacks the capacity to act on its stance across a sustained
+> task. Whether the grit vector produces genuine persistent-determination
+> *behavior* (re-attempting, self-correcting, refusing to exit a task loop) is
+> an open question, pending **deeper agentic multi-turn testing on larger
+> models when suitable hardware becomes available**.
+
 > 📊 **See [RESULTS.md](RESULTS.md) for live A/B samples** — clear-cut cases
 > where the baseline validates quitting and grit-on refuses to.
 
