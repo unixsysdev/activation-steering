@@ -1,0 +1,26 @@
+diff --git a/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py b/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py
+index 36ef407..2163ae2 100644
+--- a/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py
++++ b/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py
+@@ -68,6 +68,21 @@ class HookLLM:
+         self.tokenizer = self.llm.get_tokenizer()
+         self.llm_engine = self.llm.llm_engine
+ 
++        # Install hooks on the worker mixin. The general-plugin path
++        # (_hook_plugin) normally does this lazily via a monkeypatched
++        # LLM.generate; when we construct LLM directly we must trigger it
++        # ourselves so the worker_extension_cls hooks are actually attached.
++        if worker is not None and enable_hook:
++            try:
++                self.llm.collective_rpc("install_hooks")
++            except Exception as e:
++                print(f"[HookLLM] install_hooks via LLM failed ({e}); "
++                      "trying engine path")
++                try:
++                    self.llm_engine.collective_rpc("install_hooks")
++                except Exception as e2:
++                    print(f"[HookLLM] install_hooks failed entirely: {e2}")
++
+         self.analyzer = None
+         if analyzer_name:
+             self.analyzer = PluginRegistry.get_analyzer(analyzer_name).analyzer

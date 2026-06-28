@@ -1,0 +1,192 @@
+diff --git a/vllm_hook_plugins/vllm_hook_plugins/workers/steer_activation_worker.py b/vllm_hook_plugins/vllm_hook_plugins/workers/steer_activation_worker.py
+index 15c8ad1..a5d5505 100644
+--- a/vllm_hook_plugins/vllm_hook_plugins/workers/steer_activation_worker.py
++++ b/vllm_hook_plugins/vllm_hook_plugins/workers/steer_activation_worker.py
+@@ -1,6 +1,6 @@
+ import os
+ import torch
+-from typing import TYPE_CHECKING, Any, Dict
++from typing import TYPE_CHECKING, Any, Dict, Optional
+ 
+ from vllm.forward_context import get_forward_context
+ from vllm_hook_plugins.workers._common import (
+@@ -23,21 +23,26 @@ def _load_steering_vector(vector_path: str) -> Dict:
+ class SteerHookActWorker:
+     """Mixin injected into vLLM's GPU Worker via worker_extension_cls.
+ 
+-    Per-request steering: each request can pass its own steering config in
+-    extra_args["steer"] (dict) — different requests in the same batch can use
+-    different vectors / methods / coefficients / optimal layers.
++    Applies a steering vector to the residual stream at a chosen layer.
++
++    Two control paths:
++      - **Global (v0.22-safe)**: a steering config is loaded at install_hooks
++        time from VLLM_HOOK_STEER_CONFIG, and applied unconditionally to the
++        last token of every active batch row at the target layer. This avoids
++        the per-request extra_args / model_runner.requests API, which moved
++        between vLLM versions.
++      - **Per-request (legacy)**: each request passes its own steering config
++        in extra_args["steer"]. Used when the model_runner exposes .requests.
+     """
+ 
+     if TYPE_CHECKING:
+         model_runner: Any
+     _hooks_installed: bool = False
++    _global_steer_cfg: Optional[Dict] = None
++    _steering_active: bool = True  # toggle via set_steering_active RPC
+ 
+     def install_hooks(self):
+-        """Install steering hooks on every transformer layer. Idempotent.
+-
+-        Each hook checks per-request ``extra_args["steer"]`` and applies
+-        steering only when the request targets this hook's layer.
+-        """
++        """Install steering hooks on every transformer layer. Idempotent."""
+         if self._hooks_installed:
+             return
+         self._hooks_installed = True
+@@ -47,6 +52,16 @@ class SteerHookActWorker:
+         except Exception as e:
+             print(f"Hook installation failed: {e}")
+ 
++    def set_steering_active(self, active: bool):
++        """Toggle whether the global steering config is applied.
++
++        Callable via collective_rpc("set_steering_active", args=(True/False,)).
++        Lets a test disable steering for the baseline run without reloading
++        the engine.
++        """
++        self._steering_active = bool(active)
++        return self._steering_active
++
+     def _install_hooks(self):
+         model = getattr(self.model_runner, "model", None)
+         if model is None:
+@@ -54,15 +69,26 @@ class SteerHookActWorker:
+             return
+ 
+         # Cache for steering vectors loaded from disk, keyed by vector_path.
+-        # Loading per-request would be too slow.
+         self._vector_cache: Dict[str, Dict] = {}
+ 
++        # --- Global steering config (v0.22-safe path) ---
++        # Set VLLM_HOOK_STEER_CONFIG=/path/to/config.json before creating the
++        # engine to apply one vector to ALL requests at the target layer.
++        cfg_path = os.environ.get("VLLM_HOOK_STEER_CONFIG")
++        if cfg_path and os.path.exists(cfg_path):
++            import json
++            with open(cfg_path) as f:
++                self._global_steer_cfg = json.load(f).get("steering")
++            print(f"[steer] global config loaded from {cfg_path}: "
++                  f"layer={self._global_steer_cfg.get('optimal_layer')} "
++                  f"coef={self._global_steer_cfg.get('coefficient')} "
++                  f"method={self._global_steer_cfg.get('method')}")
++
+         def _apply_steer(slice_view: torch.Tensor, cfg: Dict) -> torch.Tensor:
+             """Return the steered residual slice for one request."""
+             method = cfg.get("method", "adjust_rs")
+             coefficient = float(cfg.get("coefficient", 0))
+ 
+-            # Cache the loaded vector data per path.
+             vector_path = cfg["vector_path"]
+             data = self._vector_cache.get(vector_path)
+             if data is None:
+@@ -78,14 +104,13 @@ class SteerHookActWorker:
+             if method == "add_vector":
+                 steered = target + coefficient * steering_vec.view(1, -1)
+             elif method == "adjust_rs":
+-                unit_vec = steering_vec  # use dir as unit vector (matches old behavior)
++                unit_vec = steering_vec
+                 avg_proj = data["avg_proj"].to(target.device, dtype=target.dtype)
+                 current_projections = torch.matmul(target, unit_vec)
+                 coeff = (avg_proj - current_projections).unsqueeze(-1)
+                 steered = target + coeff * unit_vec.view(1, -1)
+             else:
+                 raise ValueError(f"Unknown steering method: {method}")
+-            # stitch the steered last row back
+             out = slice_view.clone()
+             out[-1:] = steered
+             return out
+@@ -94,7 +119,6 @@ class SteerHookActWorker:
+             ctx = get_forward_context()
+             metadata = getattr(ctx, "attn_metadata", None)
+ 
+-            # Warmup or non-attention passes: nothing to do
+             if metadata is None:
+                 return output
+             if torch.cuda.is_current_stream_capturing():
+@@ -107,10 +131,23 @@ class SteerHookActWorker:
+             bs = len(query_start_loc) - 1
+             last_indices = query_start_loc
+ 
+-            try:
+-                req_ids = self.model_runner.input_batch.req_ids
+-            except Exception:
+-                return output
++            # Resolve the per-request steering configs. Try the v0.22
++            # model_runner.requests API; if unavailable (older or proxy
++            # runner), fall back to the global config for all rows.
++            mr = self.model_runner
++            requests = getattr(mr, "requests", None)
++            req_states = getattr(mr, "req_states", None)
++            index_to_req_id = getattr(req_states, "index_to_req_id", None) if req_states else None
++
++            per_request_cfgs = None  # list[Optional[dict]], len bs
++            if index_to_req_id is not None and requests:
++                req_ids = list(index_to_req_id.values())[:bs]
++                per_request_cfgs = []
++                for req_id in req_ids:
++                    rs = requests.get(req_id)
++                    sp = getattr(rs, "sampling_params", None) if rs else None
++                    extra = getattr(sp, "extra_args", None) if sp else None
++                    per_request_cfgs.append(extra.get("steer") if extra else None)
+ 
+             is_tuple = isinstance(output, tuple)
+             if is_tuple:
+@@ -119,30 +156,19 @@ class SteerHookActWorker:
+                 hidden_states = None
+                 residuals = output
+ 
+-            # Per-request slicing — non-steered rows keep their original values
+-            # because we only write to [start:end] for matching requests.
+             steered_any = False
+             for i in range(bs):
+-                req_id = req_ids[i]
+-                req_state = self.model_runner.requests.get(req_id)
+-                if req_state is None or req_state.sampling_params is None:
+-                    continue
+-                extra = req_state.sampling_params.extra_args
+-                if not extra:
+-                    continue
+-
+-                cfg = extra.get("steer")
++                # Per-request config wins; else global config; else skip.
++                cfg = None
++                if per_request_cfgs is not None and i < len(per_request_cfgs):
++                    cfg = per_request_cfgs[i]
++                if cfg is None and self._steering_active:
++                    cfg = self._global_steer_cfg
+                 if not isinstance(cfg, dict):
+                     continue
+                 if int(cfg.get("optimal_layer", -1)) != layer_num:
+                     continue
+ 
+-                # if no apply_at_all_positions, then no-ops for decode phase
+-                if not bool(cfg.get("apply_at_all_positions", True)):
+-                    is_prefill = len(req_state.output_token_ids) == 0
+-                    if not is_prefill:
+-                        continue
+-
+                 start = int(last_indices[i].item())
+                 end = int(last_indices[i + 1].item())
+                 residuals[start:end] = _apply_steer(residuals[start:end], cfg)
+@@ -155,8 +181,7 @@ class SteerHookActWorker:
+             else:
+                 return residuals
+ 
+-        # Hook every transformer layer; the closure decides per-request whether
+-        # to actually steer based on extra_args["steer"].
++        # Hook every transformer layer.
+         self._hooks = []
+         matched = []
+         for name, module, layer_num in iter_matched_modules(model, match_layer):

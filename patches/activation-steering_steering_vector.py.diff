@@ -1,0 +1,24 @@
+diff --git a/activation_steering/steering_vector.py b/activation_steering/steering_vector.py
+index 74a445c..f310811 100644
+--- a/activation_steering/steering_vector.py
++++ b/activation_steering/steering_vector.py
+@@ -81,8 +81,8 @@ class SteeringVector:
+         log(f"Saving SteeringVector to {file_path}", class_name="SteeringVector")
+         data = {
+             "model_type": self.model_type,
+-            "directions": {k: v.tolist() for k, v in self.directions.items()},
+-            "explained_variances": self.explained_variances
++            "directions": {k: [float(x) for x in v.tolist()] for k, v in self.directions.items()},
++            "explained_variances": {k: float(v) for k, v in self.explained_variances.items()}
+         }
+         with open(file_path, 'w') as f:
+             json.dump(data, f)
+@@ -307,7 +307,7 @@ def batched_get_hiddens(model, tokenizer, inputs: list[str], hidden_layer_ids: l
+                     else:
+                         accumulated_hidden_state = torch.mean(batch_hidden[-accumulate_last_x_tokens:, :], dim=0)
+                     
+-                    hidden_states[layer_id].append(accumulated_hidden_state.squeeze().cpu().numpy())
++                    hidden_states[layer_id].append(accumulated_hidden_state.squeeze().float().cpu().numpy())
+             
+             
+             # Delete the model output to free up memory
