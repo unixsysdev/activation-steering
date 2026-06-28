@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Trained vectors / figures (large, regenerable — kept out of git)
+vectors/
+figures/
+
+# Model weights (never commit — download separately)
+*.safetensors
+*.bin
+*.pt
+!steering_vectors/*.pt
+
+# HuggingFace cache
+.cache/
+
+# Misc
+*.log
+.DS_Store
