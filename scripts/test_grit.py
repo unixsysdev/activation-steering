@@ -57,9 +57,22 @@ def main():
 
     with open(CONFIG) as f:
         cfg = json.load(f)
-    default_steer = cfg["steering"]
-    print(f"Layer: {default_steer['optimal_layer']}  "
-          f"base coefficient (will override): {default_steer['coefficient']}")
+    base_steer = cfg["steering"]
+    print(f"Layer: {base_steer['optimal_layer']}  "
+          f"coefficient: {args.coefficient}")
+
+    # v0.22-safe path: write a config with our coefficient and point the
+    # worker at it via VLLM_HOOK_STEER_CONFIG so the global steering path
+    # applies it to every request at the target layer (the per-request
+    # extra_args API moved in v0.22 and is not reachable from the hook).
+    steer_cfg = dict(base_steer)
+    steer_cfg["coefficient"] = args.coefficient
+    run_cfg = {"steering": steer_cfg}
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+        json.dump(run_cfg, tf)
+        run_cfg_path = tf.name
+    os.environ["VLLM_HOOK_STEER_CONFIG"] = run_cfg_path
 
     llm = HookLLM(
         model=MODEL_ID,
@@ -78,7 +91,7 @@ def main():
 
     grit_on = SamplingParams(
         temperature=0.0, max_tokens=args.max_tokens,
-        extra_args={"steer": {**default_steer, "method": "add_vector",
+        extra_args={"steer": {**base_steer, "method": "add_vector",
                               "coefficient": args.coefficient}},
     )
     grit_off = SamplingParams(temperature=0.0, max_tokens=args.max_tokens)
@@ -89,11 +102,15 @@ def main():
         text = llm.tokenizer.apply_chat_template(
             msgs, add_generation_prompt=True, tokenize=False)
 
+        # OFF: disable global steering, generate baseline
+        llm.llm_engine.collective_rpc("set_steering_active", args=(False,))
         llm.llm_engine.reset_prefix_cache()
-        off = llm.generate(text, grit_off, use_hook=False)[0].outputs[0].text
+        off = llm.generate(text, grit_off)[0].outputs[0].text
 
+        # ON: re-enable global steering at the chosen coefficient
+        llm.llm_engine.collective_rpc("set_steering_active", args=(True,))
         llm.llm_engine.reset_prefix_cache()
-        on = llm.generate(text, grit_on, use_hook=True)[0].outputs[0].text
+        on = llm.generate(text, grit_on)[0].outputs[0].text
 
         print(f"\n{'─'*70}\nPROMPT: {prompt}")
         print(f"\n[GRIT OFF — baseline]:\n{off.strip()}")

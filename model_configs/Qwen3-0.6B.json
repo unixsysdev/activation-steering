@@ -1,0 +1,15 @@
+{
+    "model_info": {
+        "provider": "attn-hf",
+        "name": "qwen3-0.6b-grit",
+        "model_id": "Qwen/Qwen3-0.6B",
+        "note": "Grit/perseverance steering vector for Qwen3-0.6B. Trained via pca_pairwise on contrastive gritty-vs-quitter completions. Applying this vector adds determination."
+    },
+    "steering": {
+        "method": "add_vector",
+        "coefficient": 1,
+        "optimal_layer": 19,
+        "vector_path": "/home/marcel/Work/steer/vLLM-Hook/steering_vectors/grit_qwen3-0.6b.pt",
+        "apply_at_all_positions": true
+    }
+}

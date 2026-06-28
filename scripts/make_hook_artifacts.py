@@ -115,7 +115,8 @@ def main():
 
     # --- Write vLLM-Hook config ---
     os.makedirs(CFG_DIR, exist_ok=True)
-    rel_vec = os.path.relpath(VEC_OUT, HOOK_ROOT)
+    # Use absolute path so the engine subprocess (different cwd) can find it.
+    abs_vec = VEC_OUT
     cfg = {
         "model_info": {
             "provider": "attn-hf",
@@ -129,7 +130,7 @@ def main():
             "method": "add_vector",      # simplest robust application: add coef*dir
             "coefficient": 1,            # tunable at request time via extra_args
             "optimal_layer": int(layer),
-            "vector_path": rel_vec,
+            "vector_path": abs_vec,
             "apply_at_all_positions": True
         }
     }
