@@ -1,11 +1,14 @@
 # Grit Steering Vector
 
 An activation steering vector that adds **determination** to a language model:
-it steers the residual stream so the model reframes failure as iteration and
+steers the residual stream so the model reframes failure as iteration and
 continues trying rather than recommending that the user stop.
 
 Trained on **Qwen3-0.6B** (`Qwen3ForCausalLM`) and applied at inference inside
 the **vLLM** engine, on AMD Strix Halo (gfx1151).
+
+> 📊 **See [RESULTS.md](RESULTS.md) for live A/B samples** — clear-cut cases
+> where the baseline validates quitting and grit-on refuses to.
 
 ## Method
 
